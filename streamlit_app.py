@@ -12,14 +12,80 @@ st.set_page_config(
 )
 
 # Конфигурация API
-API_BASE_URL = "http://localhost:80"
+API_BASE_URL = "http://localhost:1101"
 
 # Заголовки для запросов
-HEADERS = {
-    "Content-Type": "application/json"
-}
+def get_headers():
+    headers = {"Content-Type": "application/json"}
+    if "access_token" in st.session_state:
+        headers["Authorization"] = f"Bearer {st.session_state.access_token}"
+    return headers
 
-# Функции для работы с API
+# Функции для работы с аутентификацией
+def register_user(username, email, password):
+    """Регистрация пользователя"""
+    url = f"{API_BASE_URL}/api/auth/register"
+    data = {
+        "username": username,
+        "email": email,
+        "password": password
+    }
+    
+    try:
+        response = requests.post(url, json=data, headers=get_headers())
+        if response.status_code == 200:
+            return response.json()
+        else:
+            error_data = response.json() if response.content else {"detail": "Ошибка регистрации"}
+            return {"error": error_data.get("detail", "Ошибка регистрации")}
+    except Exception as e:
+        return {"error": f"Ошибка подключения к API: {e}"}
+
+def login_user(username, password):
+    """Вход пользователя"""
+    url = f"{API_BASE_URL}/api/auth/login"
+    data = {
+        "username": username,
+        "password": password
+    }
+    
+    try:
+        response = requests.post(url, json=data, headers=get_headers())
+        if response.status_code == 200:
+            return response.json()
+        else:
+            error_data = response.json() if response.content else {"detail": "Ошибка входа"}
+            return {"error": error_data.get("detail", "Ошибка входа")}
+    except Exception as e:
+        return {"error": f"Ошибка подключения к API: {e}"}
+
+def get_current_user():
+    """Получение информации о текущем пользователе"""
+    url = f"{API_BASE_URL}/api/auth/me"
+    
+    try:
+        response = requests.get(url, headers=get_headers())
+        if response.status_code == 200:
+            return response.json()
+        else:
+            return None
+    except Exception as e:
+        return None
+
+def logout_user():
+    """Выход пользователя"""
+    url = f"{API_BASE_URL}/api/auth/logout"
+    
+    try:
+        response = requests.post(url, headers=get_headers())
+        if response.status_code == 200:
+            return True
+        else:
+            return False
+    except Exception as e:
+        return False
+
+# Функции для работы с API ключами
 def create_api_key(name, expires_days=None):
     """Создать новый API ключ"""
     url = f"{API_BASE_URL}/api/keys"
@@ -28,64 +94,139 @@ def create_api_key(name, expires_days=None):
         data["expires_in_days"] = expires_days
 
     try:
-        response = requests.post(url, json=data, headers=HEADERS)
+        response = requests.post(url, json=data, headers=get_headers())
         if response.status_code == 200:
             return response.json()
         else:
-            st.error(f"Ошибка при создании ключа: {response.text}")
-            return None
+            error_data = response.json() if response.content else {"detail": "Ошибка создания ключа"}
+            return {"error": error_data.get("detail", "Ошибка создания ключа")}
     except Exception as e:
-        st.error(f"Ошибка подключения к API: {e}")
-        return None
+        return {"error": f"Ошибка подключения к API: {e}"}
 
 def get_api_keys():
-    """Получить все API ключи"""
+    """Получить все API ключи пользователя"""
     url = f"{API_BASE_URL}/api/keys"
     try:
-        response = requests.get(url, headers=HEADERS)
+        response = requests.get(url, headers=get_headers())
         if response.status_code == 200:
             return response.json()
         else:
-            st.error(f"Ошибка при получении ключей: {response.text}")
             return []
     except Exception as e:
-        st.error(f"Ошибка подключения к API: {e}")
         return []
 
 def delete_api_key(key_id):
     """Удалить API ключ"""
     url = f"{API_BASE_URL}/api/keys/{key_id}"
     try:
-        response = requests.delete(url, headers=HEADERS)
+        response = requests.delete(url, headers=get_headers())
         if response.status_code == 200:
             return True
         else:
-            st.error(f"Ошибка при удалении ключа: {response.text}")
             return False
     except Exception as e:
-        st.error(f"Ошибка подключения к API: {e}")
         return False
 
 def toggle_api_key(key_id):
     """Включить/выключить API ключ"""
     url = f"{API_BASE_URL}/api/keys/{key_id}/toggle"
     try:
-        response = requests.put(url, headers=HEADERS)
+        response = requests.put(url, headers=get_headers())
         if response.status_code == 200:
             return True
         else:
-            st.error(f"Ошибка при изменении статуса ключа: {response.text}")
             return False
     except Exception as e:
-        st.error(f"Ошибка подключения к API: {e}")
         return False
 
-# Основной интерфейс
-def main():
-    st.title("🔑 WindexRouter - Управление API ключами")
+# Интерфейс входа/регистрации
+def auth_page():
+    """Страница аутентификации"""
+    st.title("🔑 WindexRouter - Вход в систему")
+    
+    tab1, tab2 = st.tabs(["Вход", "Регистрация"])
+    
+    with tab1:
+        st.header("Вход в систему")
+        
+        with st.form("login_form"):
+            username = st.text_input("Имя пользователя", placeholder="Введите имя пользователя")
+            password = st.text_input("Пароль", type="password", placeholder="Введите пароль")
+            
+            if st.form_submit_button("Войти", type="primary"):
+                if username and password:
+                    result = login_user(username, password)
+                    if "error" in result:
+                        st.error(f"❌ {result['error']}")
+                    else:
+                        st.session_state.access_token = result["access_token"]
+                        st.session_state.user_info = {
+                            "username": username,
+                            "token": result["access_token"],
+                            "expires_at": result["expires_at"]
+                        }
+                        st.success("✅ Успешный вход!")
+                        st.rerun()
+                else:
+                    st.error("❌ Пожалуйста, заполните все поля")
+    
+    with tab2:
+        st.header("Регистрация")
+        
+        with st.form("register_form"):
+            username = st.text_input("Имя пользователя", placeholder="Введите имя пользователя")
+            email = st.text_input("Email", placeholder="Введите email")
+            password = st.text_input("Пароль", type="password", placeholder="Введите пароль")
+            password_confirm = st.text_input("Подтвердите пароль", type="password", placeholder="Подтвердите пароль")
+            
+            if st.form_submit_button("Зарегистрироваться", type="primary"):
+                if username and email and password and password_confirm:
+                    if password != password_confirm:
+                        st.error("❌ Пароли не совпадают")
+                    elif len(password) < 6:
+                        st.error("❌ Пароль должен содержать минимум 6 символов")
+                    else:
+                        result = register_user(username, email, password)
+                        if "error" in result:
+                            st.error(f"❌ {result['error']}")
+                        else:
+                            st.success("✅ Регистрация успешна! Теперь вы можете войти в систему.")
+                else:
+                    st.error("❌ Пожалуйста, заполните все поля")
 
+# Личный кабинет пользователя
+def user_dashboard():
+    """Личный кабинет пользователя"""
+    # Получаем информацию о пользователе
+    user_info = get_current_user()
+    if not user_info:
+        st.error("❌ Ошибка получения информации о пользователе")
+        return
+    
+    # Заголовок с информацией о пользователе
+    col1, col2, col3 = st.columns([2, 1, 1])
+    
+    with col1:
+        st.title(f"👋 Добро пожаловать, {user_info['username']}!")
+    
+    with col2:
+        st.metric("Email", user_info['email'])
+    
+    with col3:
+        if st.button("🚪 Выйти", type="secondary"):
+            if logout_user():
+                # Очищаем сессию
+                for key in list(st.session_state.keys()):
+                    del st.session_state[key]
+                st.success("✅ Успешный выход!")
+                st.rerun()
+            else:
+                st.error("❌ Ошибка при выходе")
+    
+    st.divider()
+    
     # Создание нового ключа
-    st.header("Создать новый API ключ")
+    st.header("🔑 Создать новый API ключ")
     col1, col2 = st.columns(2)
 
     with col1:
@@ -99,7 +240,9 @@ def main():
             if expires_days == 0:
                 expires_days = None
             result = create_api_key(key_name.strip(), expires_days)
-            if result:
+            if "error" in result:
+                st.error(f"❌ {result['error']}")
+            else:
                 st.success("✅ Ключ успешно создан!")
                 st.code(result["key"], language="text")
                 st.rerun()
@@ -109,7 +252,7 @@ def main():
     st.divider()
 
     # Список существующих ключей
-    st.header("📋 Существующие API ключи")
+    st.header("📋 Мои API ключи")
 
     keys = get_api_keys()
 
@@ -213,6 +356,7 @@ def main():
     - 🔄 Активация/деактивация ключей
     - 🗑️ Удаление ненужных ключей
     - 📊 Просмотр всех созданных ключей
+    - 👤 Личный кабинет пользователя
 
     ### Использование в проектах:
     ```python
@@ -221,6 +365,14 @@ def main():
     response = requests.get("https://your-api.com/endpoint", headers=headers)
     ```
     """)
+
+# Основная функция
+def main():
+    # Проверяем, авторизован ли пользователь
+    if "access_token" not in st.session_state:
+        auth_page()
+    else:
+        user_dashboard()
 
 if __name__ == "__main__":
     main()
