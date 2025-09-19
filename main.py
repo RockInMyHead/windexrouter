@@ -1,14 +1,16 @@
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, HTTPException, Depends, status, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel, EmailStr
-from typing import List, Optional
+from typing import List, Optional, Dict, Any
 import sqlite3
 import uuid
 import hashlib
 import secrets
 from datetime import datetime, timedelta
 import os
+import httpx
+import json
 
 app = FastAPI(title="WindexRouter API", description="API для генерации и управления API ключами")
 
@@ -107,6 +109,18 @@ def init_db():
         )
     ''')
     
+    # Таблица для логирования использования API
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS api_usage_log (
+            id TEXT PRIMARY KEY,
+            user_id TEXT NOT NULL,
+            api_key_id TEXT NOT NULL,
+            endpoint TEXT NOT NULL,
+            timestamp TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users (id)
+        )
+    ''')
+    
     conn.commit()
     conn.close()
 
@@ -173,6 +187,46 @@ async def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(s
         created_at=result[3],
         is_active=bool(result[4])
     )
+
+# Функция для валидации API ключа
+async def validate_api_key(api_key: str) -> Optional[tuple]:
+    """Валидация API ключа и получение пользователя и ID ключа"""
+    conn = sqlite3.connect('api_keys.db')
+    cursor = conn.cursor()
+    
+    cursor.execute('''
+        SELECT u.id, u.username, u.email, u.created_at, u.is_active, ak.expires_at, ak.id
+        FROM users u
+        JOIN api_keys ak ON u.id = ak.user_id
+        WHERE ak.key = ? AND ak.is_active = 1 AND u.is_active = 1
+    ''', (api_key,))
+    
+    result = cursor.fetchone()
+    conn.close()
+    
+    if not result:
+        return None
+    
+    # Проверяем срок действия ключа
+    if result[5]:  # expires_at
+        expires_at = datetime.fromisoformat(result[5])
+        if expires_at < datetime.now():
+            return None
+    
+    user = User(
+        id=result[0],
+        username=result[1],
+        email=result[2],
+        created_at=result[3],
+        is_active=bool(result[4])
+    )
+    
+    return user, result[6]  # Возвращаем пользователя и ID ключа
+
+# DeepSeek API конфигурация
+DEEPSEEK_API_BASE = os.getenv("DEEPSEEK_API_BASE", "http://localhost:1103")
+# DEEPSEEK_API_URL = os.getenv("DEEPSEEK_API_URL", "http://localhost:1103/api/chat/completions")  # Local DeepSeek endpoint
+#DEEPSEEK_FORWARD_URL = os.getenv("DEEPSEEK_FORWARD_URL", DEEPSEEK_API_URL)
 
 # Инициализация БД при запуске
 init_db()
@@ -363,6 +417,134 @@ async def toggle_api_key(key_id: str, current_user: User = Depends(get_current_u
 
     return {"message": f"Ключ {'активирован' if new_status else 'деактивирован'}"}
 
+# DeepSeek API проксирование
+@app.post("/api/deepseek/chat/completions")
+async def deepseek_chat_completions(request: Request):
+    """Проксирование запросов к DeepSeek API"""
+    # Получаем API ключ из заголовка Authorization
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Требуется API ключ в заголовке Authorization: Bearer <your-api-key>",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    api_key = auth_header[7:]  # Убираем "Bearer "
+    
+    # Валидируем API ключ
+    validation_result = await validate_api_key(api_key)
+    if not validation_result:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Недействительный или истекший API ключ",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    user, key_id = validation_result
+    
+    # Получаем данные запроса
+    try:
+        request_data = await request.json()
+    except json.JSONDecodeError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Неверный JSON в теле запроса"
+        )
+    
+    # Проверяем наличие обязательных полей
+    if "messages" not in request_data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Отсутствует поле 'messages' в запросе"
+        )
+    
+    # Подготавливаем запрос к локальному DeepSeek
+    deepseek_url = f"{DEEPSEEK_API_BASE}/api/chat/completions"
+    deepseek_headers = {"Content-Type": "application/json"}
+    
+    # Добавляем логирование использования
+    conn = sqlite3.connect('api_keys.db')
+    cursor = conn.cursor()
+    log_id = str(uuid.uuid4())
+    cursor.execute('''
+        INSERT INTO api_usage_log (id, user_id, api_key_id, endpoint, timestamp)
+        VALUES (?, ?, ?, ?, ?)
+    ''', (log_id, user.id, key_id, "deepseek_chat", datetime.now().isoformat()))
+    conn.commit()
+    conn.close()
+    
+    # Отправляем запрос к DeepSeek
+    try:
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                deepseek_url,
+                json=request_data,
+                headers=deepseek_headers
+            )
+            
+            if response.status_code == 200:
+                return response.json()
+            else:
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"Ошибка DeepSeek API: {response.text}"
+                )
+                
+    except httpx.TimeoutException:
+        raise HTTPException(
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            detail="Таймаут при обращении к DeepSeek API"
+        )
+    except httpx.RequestError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Ошибка подключения к DeepSeek API: {str(e)}"
+        )
+
+@app.get("/api/deepseek/models")
+async def deepseek_models(request: Request):
+    """Получение списка доступных моделей DeepSeek"""
+    # Получаем API ключ из заголовка Authorization
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Требуется API ключ в заголовке Authorization: Bearer <your-api-key>",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    api_key = auth_header[7:]  # Убираем "Bearer "
+    
+    # Валидируем API ключ
+    validation_result = await validate_api_key(api_key)
+    if not validation_result:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Недействительный или истекший API ключ",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+    
+    user, key_id = validation_result
+    
+    # Проксируем запрос к локальному DeepSeek
+    models_url = f"{DEEPSEEK_API_BASE}/api/models"
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            resp = await client.get(models_url)
+            if resp.status_code == 200:
+                return resp.json()
+            else:
+                raise HTTPException(
+                    status_code=resp.status_code,
+                    detail=f"DeepSeek error: {resp.text}"
+                )
+    except httpx.RequestError as e:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Ошибка подключения к DeepSeek: {str(e)}"
+        )
+
 @app.get("/")
 async def root():
     """Главная страница"""
@@ -370,4 +552,4 @@ async def root():
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=80)
+    uvicorn.run(app, host="0.0.0.0", port=1101)

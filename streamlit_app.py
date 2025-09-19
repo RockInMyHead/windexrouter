@@ -348,7 +348,7 @@ def user_dashboard():
     st.divider()
     st.header("ℹ️ О проекте")
     st.markdown("""
-    **WindexRouter** - система управления API ключами для проектов.
+    **WindexRouter** - система управления API ключами с доступом к DeepSeek AI.
 
     ### Возможности:
     - 🔑 Генерация уникальных API ключей
@@ -357,12 +357,52 @@ def user_dashboard():
     - 🗑️ Удаление ненужных ключей
     - 📊 Просмотр всех созданных ключей
     - 👤 Личный кабинет пользователя
+    - 🤖 **Доступ к DeepSeek AI через ваши API ключи**
 
-    ### Использование в проектах:
+    ### Использование DeepSeek API:
     ```python
-    # Пример использования API ключа
-    headers = {"Authorization": "Bearer your_api_key_here"}
-    response = requests.get("https://your-api.com/endpoint", headers=headers)
+    import requests
+
+    # Ваш API ключ из WindexRouter
+    api_key = "wr_your_api_key_here"
+    
+    # Запрос к DeepSeek через WindexRouter
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    
+    data = {
+        "model": "deepseek-chat",
+        "messages": [
+            {"role": "user", "content": "Привет! Как дела?"}
+        ],
+        "max_tokens": 100
+    }
+    
+    response = requests.post(
+        "http://localhost:1101/api/deepseek/chat/completions",
+        json=data,
+        headers=headers
+    )
+    
+    if response.status_code == 200:
+        result = response.json()
+        print(result["choices"][0]["message"]["content"])
+    else:
+        print(f"Ошибка: {response.text}")
+    ```
+
+    ### Доступные модели DeepSeek:
+    - **deepseek-chat** - Универсальная модель для чата
+    - **deepseek-coder** - Специализированная модель для программирования
+
+    ### Получение списка моделей:
+    ```python
+    response = requests.get(
+        "http://localhost:1101/api/deepseek/models",
+        headers={"Authorization": f"Bearer {api_key}"}
+    )
     ```
     """)
 

@@ -3,5 +3,6 @@ uvicorn[standard]
 streamlit
 python-dotenv
 email-validator
+httpx
 
 
